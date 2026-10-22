@@ -1,4 +1,4 @@
-const CACHE = 'marcador-v5';
+const CACHE = 'marcador-v6';
 const FILES = ['./', './index.html', './icon.png'];
 
 self.addEventListener('install', e => {

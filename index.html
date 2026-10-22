@@ -80,16 +80,29 @@ footer button{flex:1}
 .tt{font-size:19px;font-weight:600}
 .tb{display:flex;gap:8px}
 .hot{background:#2a4a35;border-color:var(--ok)}
-.rec{display:flex;gap:12px;align-items:center;width:100%;text-align:left;margin-bottom:8px}
+.rec{display:flex;gap:12px;align-items:center;width:100%;text-align:left;margin:10px 0 8px}
 .rec.best{border-color:var(--acc);background:#1b2431}
 .ri{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ri small{color:var(--mut)}
-.urow{display:grid;grid-template-columns:96px 1fr 1fr 1fr;gap:6px;align-items:center;padding:4px 0}
-.urow.tap{cursor:pointer}
-.urow.tap .tile{border-color:var(--acc)}
-.uh span{text-align:center;font-size:12px;color:var(--mut)}
-.uh .cur{color:var(--acc);font-weight:600}
-.pc{text-align:center;padding:7px 0;border-radius:7px;font-variant-numeric:tabular-nums;background:linear-gradient(90deg,rgba(138,164,200,.4) calc(var(--p)*1%),rgba(255,255,255,.035) 0)}
+.pcell{display:flex;flex-direction:column;align-items:stretch;padding:0;min-width:0;overflow:hidden;background:#1d2024;border:1px solid #3a3f46;border-radius:8px}
+.pcell.tap{border-color:#56627a}
+.pcell.dim{opacity:.6}
+.pcell .tile{--d:clamp(6px,2.3vw,9.5px);border:0;border-radius:0;background:transparent;height:52px;width:100%;padding:0 2px;min-width:0}
+.pcell .tile .h{padding:0;min-width:0}
+.pp{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid #2e3237;font-size:11px;font-variant-numeric:tabular-nums}
+.pp b{font-weight:500;color:var(--mut);padding:3px 0;text-align:center;width:auto;background:none}
+.pp b.hi{color:var(--tx);font-weight:700}
+.pp b.cur{color:var(--acc)}
+.leg{display:grid;grid-template-columns:repeat(3,1fr);font-size:11px;color:var(--mut);text-align:center;margin:-2px 0 6px;max-width:25%}
+.leg{max-width:none;width:calc((100% - 24px)/4)}
+.bigt{--d:8px}
+.ri em{font-style:normal;color:var(--acc)}
+.ri small{line-height:1.3}
+.alts{display:flex;flex-wrap:wrap;gap:8px}
+.alt{display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 8px;border-radius:10px}
+.alt small{color:var(--mut);font-size:12px}
+.row5{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.row5 .chip{padding:8px 4px}
 .nums{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
 .nums>span{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 0;text-align:center;display:flex;flex-direction:column;font-size:15px}
 .nums b{color:var(--mut);font-size:12px;font-weight:500}
@@ -151,30 +164,51 @@ const store={
 };
 
 //#ENGINE_START
+/* ===== Motor de dominó boricua: conteo, lectura de señales y simulación ===== */
 const ALL=[];for(let a=0;a<=6;a++)for(let b=a;b<=6;b++)ALL.push([a,b]);
 const idOf=t=>t[0]+'-'+t[1];
-const byId={};ALL.forEach(t=>byId[idOf(t)]=t);
+const byId={},IDX={};ALL.forEach((t,i)=>{byId[idOf(t)]=t;IDX[idOf(t)]=i;});
+const TA=ALL.map(t=>t[0]),TB=ALL.map(t=>t[1]),TP=ALL.map(t=>t[0]+t[1]);
 const other=(t,v)=>t[0]===v?t[1]:t[0];
 const nextSeat=(A,s)=>(s+(A.dir===-1?3:1))%4;
+// asiento <-> posición en el orden de juego (0 yo, 1 el que tira después de mí, 2 compañero, 3 el que tira antes de mí)
+const s2p=(A,s)=>A.dir===-1?(4-s)%4:s;
+const E2N={F:0,L:1,R:2};
+// Modelo de "jugador con lógica": pesos de cada criterio (ajustados con simulación)
+const W={pip:0.15,dbl:1.0,keep:0.6,nxt:0.8,blk:1.5,part:1.2};
+// beta: cuánto confiamos en que los demás juegan con lógica (0 = ignorar señales)
+const CFG={beta:1.0,ns:1500,roll:200,endg:8,noise:0.35};
+
+function mulberry(seed){let a=seed>>>0;return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function hashStr(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
 
 function derive(A){
-  const st={board:null,playedIds:new Set(),plays:[0,0,0,0],noHas:[new Set(),new Set(),new Set(),new Set()],turn:A.starter,streak:0,over:null,playedPips:0};
-  for(const ev of A.events){
+  const st={board:null,playedIds:new Set(),plays:[0,0,0,0],noHas:[new Set(),new Set(),new Set(),new Set()],turn:A.starter,streak:0,over:null,playedPips:0,
+    nh:[0,0,0,0],ctx:[],lead:[-1,-1,-1,-1],puts:[0,1,2,3].map(()=>[0,0,0,0,0,0,0]),playedCnt:[0,0,0,0,0,0,0]};
+  A.events.forEach((ev,n)=>{
+    const p=s2p(A,ev.s);
     if(ev.k==='p'){
-      const t=ev.t;
-      if(!st.board||ev.e==='F'){st.board={l:t[0],r:t[1]};}
-      else if(ev.e==='L'){st.board.l=other(t,st.board.l);}
-      else{st.board.r=other(t,st.board.r);}
+      const t=ev.t,ti=IDX[idOf(t)];
+      const bl=st.board?st.board.l:-1,br=st.board?st.board.r:-1;
+      const forced=A.first&&n===0;           // el 6|6 de la primera mano no es una decisión
+      if(p!==0&&!forced)st.ctx.push({p,ti,e:st.board?(E2N[ev.e]||0):0,l:bl,r:br,nh:st.nh.slice(),fut:[]});
+      for(const c of st.ctx)if(c.p===p)c.fut.push(ti);
+      if(!st.board||ev.e==='F'){
+        st.board={l:t[0],r:t[1]};
+        if(!forced)st.lead[p]=ti;
+      }else if(ev.e==='L'){st.board.l=other(t,st.board.l);st.puts[p][st.board.l]++;}
+      else{st.board.r=other(t,st.board.r);st.puts[p][st.board.r]++;}
+      st.playedCnt[t[0]]++;if(t[1]!==t[0])st.playedCnt[t[1]]++;
       st.playedIds.add(idOf(t));st.plays[ev.s]++;st.streak=0;st.playedPips+=t[0]+t[1];
       if(st.plays[ev.s]===7&&!st.over)st.over={type:'domino',seat:ev.s};
       st.turn=nextSeat(A,ev.s);
     }else{
-      if(st.board){st.noHas[ev.s].add(st.board.l);st.noHas[ev.s].add(st.board.r);}
+      if(st.board){st.noHas[ev.s].add(st.board.l);st.noHas[ev.s].add(st.board.r);st.nh[p]|=(1<<st.board.l)|(1<<st.board.r);}
       st.streak++;
       if(st.streak>=4&&!st.over)st.over={type:'tranque'};
       st.turn=nextSeat(A,ev.s);
     }
-  }
+  });
   return st;
 }
 
@@ -186,105 +220,197 @@ function legalOptions(t,board){
   return out;
 }
 
-function maskFor(t,noHas){
-  let m=0;
-  for(let j=0;j<3;j++){const s=noHas[j+1];if(!s.has(t[0])&&!s.has(t[1]))m|=(1<<j);}
-  return m;
-}
-
-// Cuenta repartos validos: cada ficha va a un asiento permitido y cada asiento termina con exactamente caps[j] fichas.
-function countAssign(masks,caps){
-  const K=masks.length;
-  if(caps.some(c=>c<0))return 0;
-  if(caps[0]+caps[1]+caps[2]!==K)return 0;
-  const mk=()=>Array.from({length:caps[0]+1},()=>new Array(caps[1]+1).fill(0));
-  let dp=mk();dp[0][0]=1;
-  for(let k=0;k<K;k++){
-    const nd=mk(),m=masks[k];
-    for(let n0=0;n0<=Math.min(k,caps[0]);n0++){
-      for(let n1=0;n1<=Math.min(k-n0,caps[1]);n1++){
-        const v=dp[n0][n1];if(!v)continue;
-        const n2=k-n0-n1;if(n2>caps[2])continue;
-        if((m&1)&&n0<caps[0])nd[n0+1][n1]+=v;
-        if((m&2)&&n1<caps[1])nd[n0][n1+1]+=v;
-        if((m&4)&&n2<caps[2])nd[n0][n1]+=v;
-      }
-    }
-    dp=nd;
-  }
-  return dp[caps[0]][caps[1]];
-}
-
-// Probabilidad exacta de que cada ficha desconocida este en cada mano (der, comp, izq).
-function computeProbs(A,st){
-  const mine=new Set(A.hand.map(idOf));
-  const pool=ALL.filter(t=>!mine.has(idOf(t))&&!st.playedIds.has(idOf(t)));
-  const caps=[1,2,3].map(s=>7-st.plays[s]);
-  const masks=pool.map(t=>maskFor(t,st.noHas));
-  const total=countAssign(masks,caps);
-  const map={};
-  if(!total)return {ok:false,pool,map};
-  pool.forEach((t,i)=>{
-    const rest=masks.filter((_,k)=>k!==i);
-    const p=[0,0,0];
-    for(let j=0;j<3;j++){
-      if(!(masks[i]&(1<<j)))continue;
-      const c2=caps.slice();c2[j]--;
-      p[j]=countAssign(rest,c2)/total;
-    }
-    map[idOf(t)]=p;
-  });
-  return {ok:true,pool,map};
-}
-
-function expectNums(pr){
-  const E=[0,1,2].map(()=>new Array(7).fill(0));
-  for(const t of pr.pool){
-    const p=pr.map[idOf(t)];
-    for(let j=0;j<3;j++){E[j][t[0]]+=p[j];if(t[1]!==t[0])E[j][t[1]]+=p[j];}
-  }
-  return E;
-}
-
-function recommend(A,st,pr){
-  const myRem=A.hand.filter(t=>!st.playedIds.has(idOf(t)));
-  const E=expectNums(pr);
-  const ns=nextSeat(A,0),os=ns===1?3:1;
-  const eP=E[1],eN=E[ns-1],eO=E[os-1];
+// jugadas posibles: arreglo plano [ficha, lado(0 sale,1 izq,2 der), nuevoIzq, nuevoDer, ...]
+function movesFor(hand,l,r){
   const out=[];
-  for(const t of myRem){
-    const cnt=new Array(7).fill(0);
-    myRem.forEach(u=>{if(u!==t){cnt[u[0]]++;if(u[1]!==u[0])cnt[u[1]]++;}});
-    const dbl=t[0]===t[1],pips=t[0]+t[1],last=myRem.length===1;
-    for(const o of legalOptions(t,st.board)){
-      const f=v=>0.6*cnt[v]+1.0*eP[v]-0.8*eN[v]-0.6*eO[v];
-      let score=f(o.l)+f(o.r)+(dbl?1.5:0)+pips*0.12;
-      if(last)score+=100;
-      const rs=[];
-      if(last)rs.push('¡dominó!');
-      else{
-        const u=[...new Set([o.l,o.r])];
-        const gP=u.filter(v=>eP[v]-eN[v]>=0.8);
-        if(gP.length)rs.push('compañero probable con '+gP.join('/'));
-        const noOpp=u.filter(v=>eN[v]+eO[v]<0.35);
-        if(noOpp.length)rs.push('rivales casi sin '+noOpp.join('/'));
-        const mine=u.filter(v=>cnt[v]>=2);
-        if(mine.length)rs.push('te quedan fichas de '+mine.join('/'));
-        if(dbl)rs.push('sueltas el doble');else if(pips>=9)rs.push('ficha pesada');
-        const bad=u.filter(v=>eN[v]-eP[v]>=1.2);
-        if(!rs.length&&bad.length)rs.push('ojo: rival fuerte en '+bad.join('/'));
-      }
-      if(!rs.length)rs.push('jugada normal');
-      out.push({t,e:o.e,l:o.l,r:o.r,score,reasons:rs.slice(0,2)});
-    }
+  if(l<0){for(const ti of hand)out.push(ti,0,TA[ti],TB[ti]);return out;}
+  for(const ti of hand){
+    const a=TA[ti],b=TB[ti];let didL=false;
+    if(a===l||b===l){out.push(ti,1,a===l?b:a,r);didL=true;}
+    if((a===r||b===r)&&!(l===r&&didL))out.push(ti,2,l,a===r?b:a);
   }
-  out.sort((a,b)=>b.score-a.score);
   return out;
+}
+
+// Qué tan buena le parece una jugada a un jugador con lógica que solo ve su mano y los pases
+function hScore(p,hand,ti,nl,nr,nh){
+  if(hand.length===1)return 1000;
+  let keep=0;
+  for(const u of hand){if(u===ti)continue;if(TA[u]===nl||TB[u]===nl)keep++;if(nl!==nr&&(TA[u]===nr||TB[u]===nr))keep++;}
+  const n=(p+1)&3,pt=(p+2)&3;
+  const ln=((nh[n]>>nl)&1)+((nh[n]>>nr)&1);
+  const lp=((nh[pt]>>nl)&1)&((nh[pt]>>nr)&1);
+  return W.pip*TP[ti]+(TA[ti]===TB[ti]?W.dbl:0)+W.keep*keep+W.nxt*ln*0.5+(ln===2?W.blk:0)-(lp?W.part:0);
+}
+
+function pips(h){let s=0;for(const t of h)s+=TP[t];return s;}
+// Resultado en puntos para tu pareja (+) o la de ellos (-). winner = posición que dominó, -1 = tranque
+function marginEnd(h,winner){
+  const tot=pips(h[0])+pips(h[1])+pips(h[2])+pips(h[3]);
+  if(winner>=0)return (winner&1)?-tot:tot;
+  const t0=pips(h[0])+pips(h[2]),t1=tot-t0;
+  return t0<t1?tot:(t1<t0?-tot:0);
+}
+
+function playout(h,l,r,turn,nh,rng){
+  let streak=0;
+  for(let g=0;g<200;g++){
+    const hand=h[turn];const mv=movesFor(hand,l,r);
+    if(!mv.length){nh[turn]|=(1<<l)|(1<<r);if(++streak>=4)return marginEnd(h,-1);turn=(turn+1)&3;continue;}
+    streak=0;let bi=0,bs=-1e9;
+    for(let i=0;i<mv.length;i+=4){const s=hScore(turn,hand,mv[i],mv[i+2],mv[i+3],nh)+CFG.noise*rng();if(s>bs){bs=s;bi=i;}}
+    hand.splice(hand.indexOf(mv[bi]),1);l=mv[bi+2];r=mv[bi+3];
+    if(!hand.length)return marginEnd(h,turn);
+    turn=(turn+1)&3;
+  }
+  return 0;
+}
+
+// Cálculo exacto (todas las manos a la vista) para el final de la mano
+function solve(h,l,r,turn,streak,alpha,beta){
+  const hand=h[turn];const mv=movesFor(hand,l,r);
+  if(!mv.length){if(streak>=3)return marginEnd(h,-1);return solve(h,l,r,(turn+1)&3,streak+1,alpha,beta);}
+  const max=(turn&1)===0;let best=max?-1e9:1e9;
+  for(let i=0;i<mv.length;i+=4){
+    const ti=mv[i],k=hand.indexOf(ti);hand.splice(k,1);
+    const v=hand.length?solve(h,mv[i+2],mv[i+3],(turn+1)&3,0,alpha,beta):marginEnd(h,turn);
+    hand.splice(k,0,ti);
+    if(max){if(v>best)best=v;if(v>alpha)alpha=v;}else{if(v<best)best=v;if(v<beta)beta=v;}
+    if(alpha>=beta)break;
+  }
+  return best;
+}
+
+// Reparte imaginariamente las fichas que no has visto (respetando pases y cuántas tiene cada uno)
+// y le da más peso a los repartos que explican mejor cómo jugó cada quien.
+function analyze(A,opt){
+  opt=opt||{};
+  const st=derive(A);
+  const beta=opt.beta!=null?opt.beta:CFG.beta,NS=opt.ns||CFG.ns;
+  const mine=new Set(A.hand.map(idOf));
+  const pool=[];for(let i=0;i<28;i++){const id=idOf(ALL[i]);if(!mine.has(id)&&!st.playedIds.has(id))pool.push(i);}
+  const seatOf=p=>A.dir===-1?(4-p)%4:p;
+  const caps=[1,2,3].map(p=>7-st.plays[seatOf(p)]);
+  const K=pool.length;
+  const res={st,pool,ok:false,probs:{}};
+  if(caps.some(c=>c<0)||caps[0]+caps[1]+caps[2]!==K)return res;
+  const masks=pool.map(ti=>{let m=0;for(let j=0;j<3;j++){const b=st.nh[j+1];if(!((b>>TA[ti])&1)&&!((b>>TB[ti])&1))m|=1<<j;}return m;});
+  const C1=caps[0],C2=caps[1],D1=C1+1,D2=C2+1;
+  const ways=new Float64Array((K+1)*D1*D2);const ix=(k,a,b)=>(k*D1+a)*D2+b;
+  ways[ix(K,0,0)]=1;
+  for(let k=K-1;k>=0;k--){const rem=K-k,m=masks[k];
+    for(let a=0;a<=Math.min(C1,rem);a++)for(let b=0;b<=Math.min(C2,rem-a);b++){const c=rem-a-b;let v=0;
+      if((m&1)&&a>0)v+=ways[ix(k+1,a-1,b)];if((m&2)&&b>0)v+=ways[ix(k+1,a,b-1)];if((m&4)&&c>0)v+=ways[ix(k+1,a,b)];ways[ix(k,a,b)]=v;}}
+  if(!(ways[ix(0,C1,C2)]>0))return res;
+  const rng=mulberry(hashStr(JSON.stringify([A.hand,A.events,A.dir,A.starter])));
+  const S=new Array(NS),LW=new Float64Array(NS);
+  for(let n=0;n<NS;n++){
+    const hs=[null,[],[],[]];let a=C1,b=C2;
+    for(let k=0;k<K;k++){const rem=K-k,c=rem-a-b,m=masks[k];
+      const w1=(m&1)&&a>0?ways[ix(k+1,a-1,b)]:0,w2=(m&2)&&b>0?ways[ix(k+1,a,b-1)]:0,w3=(m&4)&&c>0?ways[ix(k+1,a,b)]:0;
+      const x=rng()*(w1+w2+w3);
+      if(x<w1){hs[1].push(pool[k]);a--;}else if(x<w1+w2||w3===0){hs[2].push(pool[k]);b--;}else hs[3].push(pool[k]);}
+    S[n]=hs;
+    if(beta>0){let lw=0;
+      for(const c of st.ctx){const hand=hs[c.p].concat(c.fut);const mv=movesFor(hand,c.l,c.r);if(mv.length<=4)continue;
+        let mx=-1e9,ch=null;const sc=[];
+        for(let i=0;i<mv.length;i+=4){const s=beta*hScore(c.p,hand,mv[i],mv[i+2],mv[i+3],c.nh);sc.push(s);if(s>mx)mx=s;if(mv[i]===c.ti&&(c.l<0||mv[i+1]===c.e))ch=s;}
+        if(ch===null)continue;let z=0;for(const s of sc)z+=Math.exp(s-mx);lw+=ch-mx-Math.log(z);}
+      LW[n]=lw;}
+  }
+  let mx=-1e300;for(let n=0;n<NS;n++)if(LW[n]>mx)mx=LW[n];
+  const Wt=new Float64Array(NS);let sum=0;for(let n=0;n<NS;n++){Wt[n]=Math.exp(LW[n]-mx);sum+=Wt[n];}
+  let s2=0;for(let n=0;n<NS;n++){Wt[n]/=sum;s2+=Wt[n]*Wt[n];}
+  // probabilidades por ficha, fichas esperadas por número y puntos esperados de cada mano
+  const pr={},E=[null,new Array(7).fill(0),new Array(7).fill(0),new Array(7).fill(0)],EP=[0,0,0,0];
+  for(const ti of pool)pr[ti]=[0,0,0,0];
+  for(let n=0;n<NS;n++){const w=Wt[n],hs=S[n];
+    for(let p=1;p<=3;p++)for(const ti of hs[p]){pr[ti][p]+=w;E[p][TA[ti]]+=w;if(TB[ti]!==TA[ti])E[p][TB[ti]]+=w;EP[p]+=w*TP[ti];}}
+  for(const ti of pool){const q=pr[ti];res.probs[idOf(ALL[ti])]=[1,2,3].map(s=>q[s2p(A,s)]);}
+  Object.assign(res,{ok:true,S,W:Wt,E,EP,ess:1/s2,total:ways[ix(0,C1,C2)]});
+  return res;
+}
+
+// Para cada ficha que puedes tirar: simula el resto de la mano en los repartos posibles y promedia los puntos
+function recommendMoves(A,an,opt){
+  opt=opt||{};const st=an.st;const R=opt.roll||CFG.roll;
+  const my=A.hand.map(t=>IDX[idOf(t)]).filter(ti=>!st.playedIds.has(idOf(ALL[ti])));
+  const l=st.board?st.board.l:-1,r=st.board?st.board.r:-1;
+  const mv=movesFor(my,l,r);
+  if(!mv.length||!an.ok)return [];
+  const rr=mulberry(777),idxs=[];const step=1/R;let u=rr()*step,c=an.W[0],j=0;
+  for(let n=0;n<R;n++){const x=u+n*step;while(x>c&&j<an.W.length-1){j++;c+=an.W[j];}idxs.push(j);}
+  const tilesLeft=my.length-1+an.pool.length;
+  const out=[];
+  for(let i=0;i<mv.length;i+=4){
+    const ti=mv[i];const rest=my.filter(x=>x!==ti);const nl=mv[i+2],nr=mv[i+3];
+    let sum=0,wins=0,ties=0;const rng=mulberry(12345);
+    for(const k of idxs){const s=an.S[k];let v;
+      if(!rest.length)v=marginEnd([rest,s[1],s[2],s[3]],0);
+      else{const h=[rest.slice(),s[1].slice(),s[2].slice(),s[3].slice()];
+        v=tilesLeft<=CFG.endg?solve(h,nl,nr,1,0,-1e9,1e9):playout(h,nl,nr,1,st.nh.slice(),rng);}
+      sum+=v;if(v>0)wins++;else if(v===0)ties++;}
+    out.push({ti,t:ALL[ti],e:['F','L','R'][mv[i+1]],l:nl,r:nr,ev:sum/idxs.length,win:wins/idxs.length,tie:ties/idxs.length});
+  }
+  out.sort((a,b)=>b.ev-a.ev);
+  return out;
+}
+
+// Las dos razones: (1) lo que hace en la mesa, (2) lo que hace por tus fichas
+function explain(A,an,rec){
+  const st=an.st,ti=rec.ti,a=TA[ti],b=TB[ti],E=an.E;
+  const SN=['tú','el rival de la derecha','tu compañero','el rival de la izquierda'];
+  const nm=p=>SN[A.dir===-1?(4-p)%4:p];
+  const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
+  const my=A.hand.map(t=>IDX[idOf(t)]).filter(x=>!st.playedIds.has(idOf(ALL[x]))&&x!==ti);
+  const cnt=[0,0,0,0,0,0,0];for(const u of my){cnt[TA[u]]++;if(TB[u]!==TA[u])cnt[TB[u]]++;}
+  const nl=rec.l,nr=rec.r,ends=nl===nr?[nl]:[nl,nr];
+  const lead=!st.board;
+  const covered=lead?-1:(rec.e==='L'?st.board.l:st.board.r);
+  const has=(x,v)=>TA[x]===v||TB[x]===v;
+  const outside=v=>7-st.playedCnt[v]-(has(ti,v)?1:0)-cnt[v];
+  const evid=(p,v)=>{const L=st.lead[p];if(L>=0&&has(L,v))return 'salió con '+TA[L]+'-'+TB[L];const n=st.puts[p][v];return n>=2?'ha puesto el '+v+' '+n+' veces':n===1?'puso el '+v:'';};
+  const pct=x=>Math.round(x*100)+'%';
+  let r1,r2;
+  if(!my.length){r1='¡Dominó! Cierras la mano';}
+  else if(nl===nr&&outside(nl)===0&&cnt[nl]===0){r1='Trancas: ustedes ganan en '+pct(rec.win)+' de los repartos posibles';}
+  else if(lead){let X=a;if(cnt[b]>cnt[a])X=b;const k=cnt[X]+1;
+    r1=k>=2?'Sales con tu número fuerte: tienes '+k+' fichas de '+X:(a===b?'Sales con un doble y te lo quitas de encima temprano':'Es la salida que más puntos deja en las simulaciones');}
+  else{
+    const C=[];
+    if(ends.every(v=>(st.nh[1]>>v)&1))C.push({s:9,t:'Haces pasar a '+nm(1)+': no tiene '+ends.join(' ni ')});
+    for(const v of ends){const d=E[2][v]-E[1][v];if(!((st.nh[2]>>v)&1)&&E[2][v]>=1.2&&d>=0.3){const x=evid(2,v);C.push({s:2+d+(x?1.5:0),t:'Le dejas el '+v+' a tu compañero ('+(x||'tiene ~'+Math.round(E[2][v])+' de '+v)+')'});}}
+    if(covered>=0&&!ends.includes(covered))for(const rp of [1,3]){const x=evid(rp,covered);if((x||E[rp][covered]>=1.5)&&E[rp][covered]>=E[2][covered])C.push({s:2+E[rp][covered]+(x?1.5:0),t:'Le tapas el '+covered+' a '+nm(rp)+(x?' ('+x+')':'')});}
+    let pn=0;for(let n=0;n<an.S.length;n++){const h1=an.S[n][1];if(!h1.some(u=>ends.some(v=>has(u,v))))pn+=an.W[n];}
+    if(pn>=0.55)C.push({s:1.5+pn,t:cap(nm(1))+' probablemente no tiene '+ends.join(' ni ')+' ('+pct(pn)+')'});
+    for(const v of ends){const x=evid(2,v);if(x&&!((st.nh[2]>>v)&1))C.push({s:1.2,t:'Mantienes vivo el '+v+' de tu compañero ('+x+')'});}
+    if(a===b)C.push({s:0.5,t:'No cambias la mesa: sigue '+nl+'–'+nr+' y no abres número nuevo'});
+    C.sort((x,y)=>y.s-x.s);
+    r1=C.length?C[0].t:'Es la que más puntos deja en las simulaciones';
+  }
+  if(!my.length){r2='Se anotan ~'+Math.round(Math.abs(rec.ev))+' puntos';}
+  else if(lead){let X=a;if(cnt[b]>cnt[a])X=b;
+    if(cnt[X]+1>=2)r2='Le avisas a tu compañero que tu número es el '+X;
+    else{const k=[0,1,2,3,4,5,6].filter(v=>cnt[v]>0).length;r2='Te quedan fichas de '+k+' números: no te quedas sin salida';}}
+  else if(a===b){const o=outside(a);r2='Sueltas el doble de '+a+(o<=2?': '+(o===1?'queda 1':'quedan '+o)+' de '+a+' afuera y te lo podían ahorcar':' a tiempo, antes de que se cierre el '+a);}
+  else{let bv=-1,bc=0;for(const v of ends)if(cnt[v]>bc){bc=cnt[v];bv=v;}
+    if(bc>=2)r2='Te quedan '+bc+' fichas de '+bv+': vuelves a jugar por ahí';
+    else if(TP[ti]>=9)r2='Sueltas una pesada ('+TP[ti]+' puntos) por si pierden la mano';
+    else{const k=[0,1,2,3,4,5,6].filter(v=>cnt[v]>0).length;r2='Te quedan fichas de '+k+' números: no te quedas sin salida';}}
+  return [r1,r2];
+}
+
+// Probabilidad de ganar el tranque (para la pantalla final)
+function tranqueOdds(A,an){
+  const st=an.st;const my=A.hand.map(t=>IDX[idOf(t)]).filter(x=>!st.playedIds.has(idOf(ALL[x])));
+  let win=0,tie=0;const mp=pips(my);
+  for(let n=0;n<an.S.length;n++){const s=an.S[n];const t0=mp+pips(s[2]),t1=pips(s[1])+pips(s[3]);if(t0<t1)win+=an.W[n];else if(t0===t1)tie+=an.W[n];}
+  return {win,tie};
 }
 //#ENGINE_END
 
 /* ---------- estado ---------- */
-const freshA=()=>({phase:'hand',hand:[],first:true,starter:null,dir:1,events:[],winner:null,showPct:false});
+const freshA=()=>({phase:'hand',hand:[],first:true,starter:null,dir:1,events:[],winner:null,showPct:false,lastWinner:null});
 let C=store.get('c1',null);
 if(!C||!Array.isArray(C.hist)||!Array.isArray(C.names))C={hist:[],names:['Nosotros','Ellos'],meta:100};
 let A=store.get('a1',null);
@@ -388,7 +514,7 @@ const PIPS=[[],[4],[0,8],[0,4,8],[0,2,6,8],[0,2,4,6,8],[0,1,2,6,7,8]];
 const face=(n,cls)=>{let s='<span class="f '+(cls||'')+'">';for(let k=0;k<9;k++)s+='<i'+(PIPS[n].includes(k)?' class="on"':'')+'></i>';return s+'</span>';};
 const tileInner=t=>'<span class="h">'+face(t[0])+'</span><b></b><span class="h">'+face(t[1])+'</span>';
 const tileHtml=(t,cls)=>'<span class="tile '+(cls||'')+'">'+tileInner(t)+'</span>';
-const secPct=(title,minLeft)=>'<div class="sech"><span class="sec">'+title+'</span>'+(minLeft>3?'<button class="chip mini" data-act="pct">'+(A.showPct?'Ocultar %':'Ver %')+'</button>':'')+'</div>';
+const secPct=title=>'<div class="sech"><span class="sec">'+title+'</span><button class="chip mini" data-act="pct">'+(A.showPct?'Ocultar %':'Ver %')+'</button></div>';
 const canUndo=()=>A.events.length>(A.first?1:0);
 
 function viewHand(){
@@ -426,25 +552,35 @@ function viewSetup(){
   return h;
 }
 
-function cell(p){const n=Math.round(p*100);return '<span class="pc" style="--p:'+n+'">'+(p<0.005?'–':n)+'</span>';}
-function unseenRows(list,pr,st,tappable){
-  let h='<div class="urow uh"><span></span>'+[1,2,3].map(s=>'<span class="'+(st.turn===s&&!st.over?'cur':'')+'">'+SHORT[s]+'</span>').join('')+'</div>';
-  list.forEach(t=>{
-    const p=pr.map[idOf(t)];
-    h+='<div class="urow '+(tappable?'tap':'')+'" '+(tappable?'data-act="oplay" ':'')+'data-t="'+idOf(t)+'">'+tileHtml(t)+cell(p[0])+cell(p[1])+cell(p[2])+'</div>';
-  });
-  return h;
-}
 function endText(r){
-  if(r.e==='F')return 'Salir con esta · mesa '+r.l+'–'+r.r;
+  if(r.e==='F')return 'Sal con esta';
   return 'Por la '+(r.e==='L'?'izquierda':'derecha')+' · mesa '+r.l+'–'+r.r;
 }
+function sideShort(r){return r.e==='F'?'sale':(r.e==='L'?'izq':'der');}
+let cKey='',cAn=null,cRecs=null;
+function getAn(){
+  const key=JSON.stringify([A.hand,A.events,A.dir,A.starter,A.first]);
+  if(key!==cKey){cKey=key;cAn=analyze(A);cRecs=null;}
+  return cAn;
+}
+function getRecs(an){
+  if(!cRecs){cRecs=an.ok?recommendMoves(A,an):[];if(cRecs.length)cRecs[0].why=explain(A,an,cRecs[0]);}
+  return cRecs;
+}
+function pcell(t,an,turnSeat,tap,pct){
+  const tag=tap?'button':'span';
+  let h='<'+tag+' class="pcell'+(tap?' tap':' dim')+'"'+(tap?' data-act="oplay"':'')+' data-t="'+idOf(t)+'"><span class="tile">'+tileInner(t)+'</span>';
+  if(pct){const p=an.probs[idOf(t)]||[0,0,0];const mx=Math.max(...p);
+    h+='<span class="pp">'+p.map((x,i)=>'<b class="'+(i+1===turnSeat?'cur ':'')+(x===mx&&x>=0.45?'hi':'')+'">'+(x<0.005?'–':Math.round(x*100))+'</b>').join('')+'</span>';}
+  return h+'</'+tag+'>';
+}
+const pctLegend='<div class="leg"><span>Der.</span><span>Comp.</span><span>Izq.</span></div>';
 
 function viewPlay(){
-  const st=derive(A),pr=computeProbs(A,st);
+  const an=getAn(),st=an.st;
   const myRem=A.hand.filter(t=>!st.playedIds.has(idOf(t)));
-  const minLeft=Math.min(...st.plays.map(p=>7-p));
-  const pctOn=!!A.showPct||minLeft<=3;
+  const pctOn=!!A.showPct;
+  const pool=an.pool.map(i=>ALL[i]);
   let h='';
   h+='<div class="board">'+(st.board?'<span>izq</span>'+face(st.board.l,'bf')+'<em>mesa</em>'+face(st.board.r,'bf')+'<span>der</span>':'<em>mesa vacía</em>')+'</div>';
   h+='<div class="seats">'+[0,1,2,3].map(s=>{
@@ -452,60 +588,61 @@ function viewPlay(){
     const info=s===0?'&nbsp;':(nh.length?'sin '+nh.join(' '):'&nbsp;');
     return '<div class="seat '+((!st.over&&st.turn===s)?'turn':'')+'"><b>'+SHORT[s]+'</b><small>'+(7-st.plays[s])+' fichas</small><small>'+info+'</small></div>';
   }).join('')+'</div>';
-  if(!pr.ok)h+='<div class="warn">Algo no cuadra con lo anotado (ficha repetida o pase imposible). Usa Deshacer.</div>';
+  if(!an.ok)h+='<div class="warn">Algo no cuadra con lo anotado (ficha repetida o pase imposible). Usa Deshacer.</div>';
 
   if(st.over){
     const total=168-st.playedPips;
-    const mine=myRem.reduce((a,t)=>a+t[0]+t[1],0);
     h+='<div class="endbox">';
     if(st.over.type==='domino'){
       const s=st.over.seat;
-      h+='<div class="big2">Dominó de '+LONG[s]+'</div><div class="sub">'+(s%2===0?'Gana tu equipo':'Ganan los rivales')+'</div>';
+      h+='<div class="big2">Dominó de '+LONG[s]+'</div><div class="sub">'+(s%2===0?'Gana tu pareja':'Gana la pareja contraria')+': se anotan <b>'+total+'</b> puntos</div>';
     }else{
-      h+='<div class="big2">Trancado</div><div class="sub">¿Quién gana la mano?</div><div class="row4">'+[0,1,2,3].map(s=>
-        '<button class="chip '+(A.winner===s?'on':'')+'" data-act="win" data-s="'+s+'">'+SHORT[s]+'</button>').join('')+'</div>';
+      h+='<div class="big2">Trancado</div><div class="sub">Puntos en juego (las cuatro manos): <b>'+total+'</b></div>';
+      if(an.ok){const o=tranqueOdds(A,an);h+='<div class="sub">Por el conteo: ustedes ganan ~'+Math.round(o.win*100)+'% · empate ~'+Math.round(o.tie*100)+'%</div>';}
+      h+='<div class="sub">Cuenten las fichas. ¿Quién ganó la mano?</div><div class="row5">'+[0,1,2,3].map(s=>
+        '<button class="chip '+(A.winner===s?'on':'')+'" data-act="win" data-s="'+s+'">'+SHORT[s]+'</button>').join('')+
+        '<button class="chip '+(A.winner==='tie'?'on':'')+'" data-act="win" data-s="tie">Empate</button></div>';
+      if(A.winner==='tie')h+='<div class="sub">Empate: nadie anota y sale el último que ganó.</div>';
     }
-    h+='<div class="sub">Puntos en fichas sin jugar (todas las manos): <b>'+total+'</b><br>Tus fichas: <b>'+mine+'</b> · Las otras tres manos: <b>'+(total-mine)+'</b></div>';
     h+='<div class="sub">Anótalo tú en el Marcador.</div>';
     const ready=st.over.type==='domino'||A.winner!=null;
     h+='<button class="big" data-act="nexthand" '+(ready?'':'disabled')+'>Siguiente mano</button>';
     h+='<button class="ghost" data-act="undo" '+(canUndo()?'':'disabled')+'>Deshacer última jugada</button></div>';
   }else{
     const myTurn=st.turn===0;
-    const recs=(myTurn&&pr.ok)?recommend(A,st,pr):[];
+    const recs=(myTurn&&an.ok)?getRecs(an):[];
     const canPass=!!st.board&&(!myTurn||recs.length===0);
     h+='<div class="turn2"><div class="tt">'+(myTurn?'Te toca':'Tira: '+LONG[st.turn])+'</div><div class="tb">'+
       '<button class="'+((myTurn&&!recs.length&&st.board)?'hot':'')+'" data-act="pass" '+(canPass?'':'disabled')+'>PASS</button>'+
       '<button data-act="undo" '+(canUndo()?'':'disabled')+'>Deshacer</button></div></div>';
     if(myTurn){
       if(recs.length){
-        h+='<div class="sec">Qué tirar</div>';
-        recs.forEach((r,i)=>{
-          h+='<button class="rec '+(i===0?'best':'')+'" data-act="myplay" data-t="'+idOf(r.t)+'" data-e="'+r.e+'">'+tileHtml(r.t)+
-             '<span class="ri"><b>'+(i===0?'★ ':'')+endText(r)+'</b><small>'+r.reasons.join(' · ')+'</small></span></button>';
-        });
-      }else if(pr.ok){h+='<div class="note" style="margin-top:12px">No tienes ficha para jugar. Pasa.</div>';}
-      if(pr.ok&&pctOn)h+=secPct('Dónde está cada ficha',minLeft)+unseenRows(pr.pool,pr,st,false);
-      else if(pr.ok)h+=secPct('',minLeft);
-    }else if(pr.ok){
-      const j=st.turn-1;
-      const legal=pr.pool.filter(t=>legalOptions(t,st.board).length);
-      h+=secPct('¿Qué tiró '+LONG[st.turn]+'? Toca la ficha',minLeft);
-      if(!legal.length)h+='<div class="note">No queda ficha jugable fuera de tu mano: le toca pasar.</div>';
-      else if(pctOn){
-        legal.sort((a,b)=>pr.map[idOf(b)][j]-pr.map[idOf(a)][j]);
-        h+=unseenRows(legal,pr,st,true);
-      }else{
-        h+='<div class="grid">'+legal.map(t=>'<button class="tile tbtn" data-act="oplay" data-t="'+idOf(t)+'">'+tileInner(t)+'</button>').join('')+'</div>';
+        const b=recs[0];
+        h+='<button class="rec best" data-act="myplay" data-t="'+idOf(b.t)+'" data-e="'+b.e+'">'+tileHtml(b.t,'bigt')+
+           '<span class="ri"><b>★ '+endText(b)+'</b><small><em>Mesa:</em> '+esc(b.why[0])+'</small><small><em>Tus fichas:</em> '+esc(b.why[1])+'</small></span></button>';
+        if(recs.length>1){
+          h+='<div class="sec dim">Otras opciones</div><div class="alts">'+recs.slice(1).map(r=>
+            '<button class="alt" data-act="myplay" data-t="'+idOf(r.t)+'" data-e="'+r.e+'">'+tileHtml(r.t)+'<small>'+sideShort(r)+' · '+(r.ev-b.ev).toFixed(1)+'</small></button>').join('')+'</div>';
+        }
+      }else if(an.ok){h+='<div class="note" style="margin-top:12px">No tienes ficha para jugar. Pasa.</div>';}
+      if(an.ok){
+        h+=secPct('Fichas que no has visto');
+        if(pctOn)h+=pctLegend+'<div class="grid">'+pool.map(t=>pcell(t,an,0,false,true)).join('')+'</div>';
       }
+    }else if(an.ok){
+      const legal=pool.filter(t=>legalOptions(t,st.board).length);
+      h+=secPct('¿Qué tiró '+LONG[st.turn]+'? Toca la ficha');
+      if(pctOn)h+=pctLegend;
+      if(!legal.length)h+='<div class="note">No queda ficha jugable fuera de tu mano: le toca pasar.</div>';
+      else h+='<div class="grid">'+legal.map(t=>pcell(t,an,st.turn,true,pctOn)).join('')+'</div>';
       if(pctOn){
-        const rest=pr.pool.filter(t=>!legalOptions(t,st.board).length);
-        if(rest.length)h+='<div class="sec dim">No pueden jugar ahora</div>'+unseenRows(rest,pr,st,false);
+        const rest=pool.filter(t=>!legalOptions(t,st.board).length);
+        if(rest.length)h+='<div class="sec dim">No pueden jugar ahora</div><div class="grid">'+rest.map(t=>pcell(t,an,st.turn,false,true)).join('')+'</div>';
       }
     }
   }
   h+='<div class="sec">Mis fichas ('+myRem.length+')</div><div class="chips">'+myRem.map(t=>tileHtml(t)).join('')+'</div>';
-  const rem=[0,1,2,3,4,5,6].map(n=>pr.pool.filter(t=>t[0]===n||t[1]===n).length);
+  const rem=[0,1,2,3,4,5,6].map(n=>pool.filter(t=>t[0]===n||t[1]===n).length);
   h+='<div class="sec">Fichas ajenas por salir, por número</div><div class="nums">'+rem.map((c,n)=>'<span>'+face(n,'nf')+c+'</span>').join('')+'</div>';
   h+='<button class="ghost" data-act="resethand">Reiniciar mano</button>';
   return h;
@@ -564,12 +701,13 @@ function act(a,d){
       A.events.push({k:'x',s:st.turn});
       break;}
     case 'undo':if(canUndo())A.events.pop();A.winner=null;break;
-    case 'win':A.winner=+d.s;break;
+    case 'win':A.winner=d.s==='tie'?'tie':+d.s;break;
     case 'pct':A.showPct=!A.showPct;break;
     case 'nexthand':{
       const st=derive(A);
-      const w=st.over&&st.over.type==='domino'?st.over.seat:A.winner;
+      let w=st.over&&st.over.type==='domino'?st.over.seat:A.winner;
       if(w==null)return;
+      if(w==='tie')w=A.lastWinner!=null?A.lastWinner:A.starter;else A.lastWinner=w;
       A.phase='hand';A.hand=[];A.events=[];A.first=false;A.starter=w;A.winner=null;A.showPct=false;
       break;}
     case 'resethand':
